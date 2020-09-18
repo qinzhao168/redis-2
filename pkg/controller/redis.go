@@ -33,6 +33,7 @@ import (
 	kutil "kmodules.xyz/client-go"
 	core_util "kmodules.xyz/client-go/core/v1"
 	dynamic_util "kmodules.xyz/client-go/dynamic"
+	meta_util "kmodules.xyz/client-go/meta"
 )
 
 func (c *Controller) create(redis *api.Redis) error {
@@ -123,6 +124,30 @@ func (c *Controller) create(redis *api.Redis) error {
 		)
 	}
 
+	_, err = c.ensureAppBinding(redis)
+	if err != nil {
+		log.Errorln(err)
+		return err
+	}
+
+	if _, err := meta_util.GetString(redis.Annotations, api.AnnotationInitialized); err == kutil.ErrNotFound &&
+		redis.Spec.Init != nil && redis.Spec.Init.Initializer != nil {
+
+		if redis.Status.Phase == api.DatabasePhaseInitializing {
+			return nil
+		}
+
+		log.Debugf("Redis %v/%v is waiting for the initializer to complete it's initialization", redis.Namespace, redis.Name)
+
+		// add phase that database is being initialized
+		_, err := util.UpdateRedisStatus(context.TODO(), c.ExtClient.KubedbV1alpha1(), redis.ObjectMeta, func(in *api.RedisStatus) *api.RedisStatus {
+			in.Phase = api.DatabasePhaseInitializing
+			return in
+		}, metav1.UpdateOptions{})
+
+		return err
+	}
+
 	rd, err := util.UpdateRedisStatus(context.TODO(), c.ExtClient.KubedbV1alpha1(), redis.ObjectMeta, func(in *api.RedisStatus) *api.RedisStatus {
 		in.Phase = api.DatabasePhaseRunning
 		in.ObservedGeneration = redis.Generation
@@ -164,11 +189,6 @@ func (c *Controller) create(redis *api.Redis) error {
 		return nil
 	}
 
-	_, err = c.ensureAppBinding(redis)
-	if err != nil {
-		log.Errorln(err)
-		return err
-	}
 	return nil
 }
 
@@ -289,11 +309,15 @@ func (c *Controller) SetDatabaseStatus(meta metav1.ObjectMeta, phase api.Databas
 	if err != nil {
 		return err
 	}
-	_, err = util.UpdateRedisStatus(context.TODO(), c.ExtClient.KubedbV1alpha1(), redis.ObjectMeta, func(in *api.RedisStatus) *api.RedisStatus {
-		in.Phase = phase
-		in.Reason = reason
-		return in
-	},
+	_, err = util.UpdateRedisStatus(
+		context.TODO(),
+		c.ExtClient.KubedbV1alpha1(),
+		redis.ObjectMeta,
+		func(in *api.RedisStatus) *api.RedisStatus {
+			in.Phase = phase
+			in.Reason = reason
+			return in
+		},
 		metav1.UpdateOptions{},
 	)
 	return err
@@ -305,8 +329,11 @@ func (c *Controller) UpsertDatabaseAnnotation(meta metav1.ObjectMeta, annotation
 		return err
 	}
 
-	_, _, err = util.PatchRedis(context.TODO(),
-		c.ExtClient.KubedbV1alpha1(), redis, func(in *api.Redis) *api.Redis {
+	_, _, err = util.PatchRedis(
+		context.TODO(),
+		c.ExtClient.KubedbV1alpha1(),
+		redis,
+		func(in *api.Redis) *api.Redis {
 			in.Annotations = core_util.UpsertMap(in.Annotations, annotation)
 			return in
 		},

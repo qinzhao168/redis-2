@@ -25,6 +25,7 @@ import (
 	kutildb "kubedb.dev/apimachinery/client/clientset/versioned/typed/kubedb/v1alpha1/util"
 	api_listers "kubedb.dev/apimachinery/client/listers/kubedb/v1alpha1"
 	amc "kubedb.dev/apimachinery/pkg/controller"
+	"kubedb.dev/apimachinery/pkg/controller/initializer/stash"
 	"kubedb.dev/apimachinery/pkg/eventer"
 
 	"github.com/appscode/go/log"
@@ -61,6 +62,8 @@ type Controller struct {
 	rdInformer cache.SharedIndexInformer
 	rdLister   api_listers.RedisLister
 }
+
+var _ amc.DBHelper = &Controller{}
 
 func New(
 	clientConfig *rest.Config,
@@ -108,6 +111,16 @@ func (c *Controller) EnsureCustomResourceDefinitions() error {
 func (c *Controller) Init() error {
 	c.initWatcher()
 	c.initSecretWatcher()
+
+	// Initialize Stash initializer
+	stash.NewController(
+		c.Controller,
+		&c.Config.Initializers.Stash,
+		c,
+		c.Recorder,
+		c.WatchNamespace,
+	).InitWatcher(c.MaxNumRequeues, c.NumThreads, c.selector)
+
 	return nil
 }
 
@@ -122,13 +135,22 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	go c.StartAndRunControllers(stopCh)
 }
 
-// StartAndRunControllers starts InformetFactory and runs queue.worker
+// StartAndRunControllers starts InformerFactory and runs queue.worker
 func (c *Controller) StartAndRunControllers(stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 
 	log.Infoln("Starting KubeDB controller")
 	c.KubeInformerFactory.Start(stopCh)
 	c.KubedbInformerFactory.Start(stopCh)
+
+	// Start Stash initializer controllers
+	go stash.NewController(
+		c.Controller,
+		&c.Config.Initializers.Stash,
+		c,
+		c.Recorder,
+		c.WatchNamespace,
+	).StartController(stopCh)
 
 	// Wait for all involved caches to be synced, before processing items from the queue is started
 	for t, v := range c.KubeInformerFactory.WaitForCacheSync(stopCh) {
